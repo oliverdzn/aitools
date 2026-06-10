@@ -53,34 +53,44 @@ async def _search(keyword: str, limit: int = 10, sort_by: str = "sales") -> list
     sort_param = sort_map.get(sort_by, "sales")
     order = "asc" if sort_by == "price_asc" else "desc"
 
-    params = (
-        f"?by={sort_param}&keyword={keyword.replace(' ', '%20')}"
-        f"&limit={min(limit, 60)}&newest=0&order={order}"
-        f"&page_type=search&scenario=PAGE_OTHERS&version=2"
+    search_page_url = (
+        f"{BASE}/search?keyword={keyword.replace(' ', '%20')}"
+        f"&sortBy={sort_param}&order={order}"
     )
+
+    captured: dict | None = None
 
     async with async_playwright() as pw:
         browser, context = await _new_context(pw)
         page = await context.new_page()
+
+        async def on_response(resp):
+            nonlocal captured
+            if "api/v4/search/search_items" in resp.url and captured is None:
+                try:
+                    captured = await resp.json()
+                except Exception:
+                    pass
+
+        page.on("response", on_response)
+
         try:
-            # Visit homepage first to get session cookies
-            await page.goto(BASE, wait_until="domcontentloaded", timeout=20000)
-
-            # Intercept the API response via fetch
-            response = await page.goto(SEARCH_URL + params, wait_until="domcontentloaded", timeout=20000)
-            body = await response.text() if response else ""
-
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                raise ValueError(f"Non-JSON response from Shopee search (len={len(body)}). Bot detection may have triggered.")
-
-            if not data.get("items"):
-                raise ValueError(f"No items in response. Top-level keys: {list(data.keys())}. Response preview: {body[:500]}")
+            # Navigate to the real search page — Shopee's own JS makes the API call
+            # with proper session cookies, bypassing bot detection on the API endpoint.
+            await page.goto(search_page_url, wait_until="networkidle", timeout=30000)
         finally:
             await browser.close()
 
-    items = data.get("items") or []
+    if not captured:
+        raise ValueError("Could not capture search API response from Shopee. Bot detection may have triggered.")
+
+    if not captured.get("items"):
+        raise ValueError(
+            f"No items in response. Top-level keys: {list(captured.keys())}. "
+            f"Preview: {json.dumps(captured)[:300]}"
+        )
+
+    items = captured.get("items") or []
     results = []
     for item in items[:limit]:
         basic = item.get("item_basic") or {}
@@ -113,25 +123,32 @@ async def _search(keyword: str, limit: int = 10, sort_by: str = "sales") -> list
 
 
 async def _get_detail(item_id: int, shop_id: int) -> dict:
+    product_page_url = f"{BASE}/i.{shop_id}.{item_id}"
+    captured: dict | None = None
+
     async with async_playwright() as pw:
         browser, context = await _new_context(pw)
         page = await context.new_page()
+
+        async def on_response(resp):
+            nonlocal captured
+            if "api/v4/item/get" in resp.url and captured is None:
+                try:
+                    captured = await resp.json()
+                except Exception:
+                    pass
+
+        page.on("response", on_response)
+
         try:
-            await page.goto(BASE, wait_until="domcontentloaded", timeout=20000)
-            response = await page.goto(
-                f"{ITEM_URL}?itemid={item_id}&shopid={shop_id}",
-                wait_until="domcontentloaded",
-                timeout=20000,
-            )
-            body = await response.text() if response else ""
-            try:
-                data = json.loads(body)
-            except json.JSONDecodeError:
-                raise ValueError(f"Non-JSON response from Shopee item API (len={len(body)}).")
+            await page.goto(product_page_url, wait_until="networkidle", timeout=30000)
         finally:
             await browser.close()
 
-    item = (data.get("data") or data.get("item") or {})
+    if not captured:
+        raise ValueError(f"Could not capture item API response for item {item_id}.")
+
+    item = (captured.get("data") or captured.get("item") or {})
     models = item.get("models") or []
     first_model = models[0] if models else {}
 
