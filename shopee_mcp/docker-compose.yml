@@ -1,0 +1,11 @@
+services:
+  shopee-mcp:
+    build: .
+    ports:
+      - "7772:7772"
+    environment:
+      - SHOPEE_PARTNER_ID=${SHOPEE_PARTNER_ID:-}
+      - SHOPEE_PARTNER_KEY=${SHOPEE_PARTNER_KEY:-}
+      - SHOPEE_ACCESS_TOKEN=${SHOPEE_ACCESS_TOKEN:-}
+      - SHOPEE_SHOP_ID=${SHOPEE_SHOP_ID:-}
+    restart: unless-stopped
