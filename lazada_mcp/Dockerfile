@@ -9,6 +9,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 8000
+EXPOSE 7771
 
-CMD ["python", "server.py", "--sse", "--port", "8000"]
+CMD ["python", "server.py", "--sse", "--port", "7771"]
