@@ -36,7 +36,7 @@ def _parse_price(val: Any) -> float | None:
     return float(cleaned) if cleaned else None
 
 
-async def _search(keyword: str, limit: int, sort: str) -> list[dict]:
+async def _search(keyword: str, limit: int, sort: str = "popularity") -> list[dict]:
     sort_map = {
         "popularity": "pop",
         "priceasc": "priceasc",
