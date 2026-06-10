@@ -74,6 +74,9 @@ async def _search(keyword: str, limit: int = 10, sort_by: str = "sales") -> list
                 data = json.loads(body)
             except json.JSONDecodeError:
                 raise ValueError(f"Non-JSON response from Shopee search (len={len(body)}). Bot detection may have triggered.")
+
+            if not data.get("items"):
+                raise ValueError(f"No items in response. Top-level keys: {list(data.keys())}. Response preview: {body[:500]}")
         finally:
             await browser.close()
 
