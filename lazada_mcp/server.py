@@ -33,7 +33,7 @@ from mcp.types import (
 )
 
 from lazada_api import LazadaClient, LazadaAPIError
-from lazada_scraper import search_products, get_product_detail
+from lazada_scraper import _search as search_products_async, _get_detail as get_product_detail_async
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -290,7 +290,7 @@ async def call_tool(name: str, arguments: dict) -> CallToolResult:
         try:
             keyword = arguments["keyword"]
             limit = min(int(arguments.get("limit", 10)), 20)
-            results = search_products(keyword, limit)
+            results = await search_products_async(keyword, limit)
             return _ok({"keyword": keyword, "count": len(results), "products": results})
         except Exception as e:
             return _err(f"Scraper error: {e}")
@@ -298,7 +298,7 @@ async def call_tool(name: str, arguments: dict) -> CallToolResult:
     if name == "lazada_get_product_detail":
         try:
             url = arguments["url"]
-            detail = get_product_detail(url)
+            detail = await get_product_detail_async(url)
             return _ok(detail)
         except Exception as e:
             return _err(f"Scraper error: {e}")
