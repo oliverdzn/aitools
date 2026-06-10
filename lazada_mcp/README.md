@@ -2,7 +2,7 @@
 
 MCP server for Lazada Philippines (`lazada.com.ph`) with two categories of tools:
 
-- **Public tools** — search and browse Lazada marketplace products. Uses Lazada's internal JSON API directly via `httpx`. No credentials, no Chromium, no cost.
+- **Public tools** — search and browse Lazada marketplace products. Uses Playwright (headless Chromium) to bypass Lazada's bot detection. No seller credentials needed.
 - **Seller tools** — manage your own listings, orders, pricing, and inventory via the official Lazada Open Platform API. Requires seller credentials.
 
 ---
@@ -10,21 +10,62 @@ MCP server for Lazada Philippines (`lazada.com.ph`) with two categories of tools
 ## Requirements
 
 - Python 3.11+
+- Chromium (installed via Playwright — see below)
 - A Lazada seller account + registered app (for seller tools only)
 
 ---
 
-## Installation
+## Installation (local)
 
 ```bash
 # 1. Clone / navigate to this folder
-cd "Lazada MCP"
+cd lazada_mcp
 
 # 2. Install dependencies
 pip install -r requirements.txt
+
+# 3. Install Playwright's Chromium browser
+playwright install chromium
+playwright install-deps chromium
 ```
 
-That's it. No browser installation needed.
+---
+
+## Running the server
+
+### Local (stdio) — for Claude Desktop on the same machine
+```bash
+python server.py
+```
+
+### Remote (SSE) — for Claude Desktop or Claude Code on a different machine
+```bash
+python server.py --sse --port 8000
+```
+
+### Docker (recommended for remote/production)
+```bash
+docker build -t lazada-mcp .
+docker run -d -p 7771:7771 \
+  -e LAZADA_APP_KEY=your_key \
+  -e LAZADA_APP_SECRET=your_secret \
+  -e LAZADA_ACCESS_TOKEN=your_token \
+  --name lazada-mcp lazada-mcp
+```
+
+Or with docker-compose:
+```yaml
+services:
+  lazada-mcp:
+    build: .
+    ports:
+      - "7771:7771"
+    environment:
+      - LAZADA_APP_KEY=your_key
+      - LAZADA_APP_SECRET=your_secret
+      - LAZADA_ACCESS_TOKEN=your_token
+    restart: unless-stopped
+```
 
 ---
 
@@ -77,12 +118,13 @@ Add to `claude_desktop_config.json`:
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
+### Local (stdio)
 ```json
 {
   "mcpServers": {
     "lazada": {
       "command": "python",
-      "args": ["C:/Users/beron/Claude/Projects/Lazada MCP/server.py"],
+      "args": ["/absolute/path/to/lazada_mcp/server.py"],
       "env": {
         "LAZADA_APP_KEY": "your_app_key",
         "LAZADA_APP_SECRET": "your_app_secret",
@@ -93,20 +135,33 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-Restart Claude Desktop — the Lazada tools will appear automatically.
+### Remote (SSE)
+```json
+{
+  "mcpServers": {
+    "lazada": {
+      "url": "https://your-server.example.com/sse"
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving — the Lazada tools will appear automatically.
+
+> **Note:** After redeploying the Docker container, restart Claude Desktop and start a new Claude Code session to re-establish the MCP connection.
 
 ---
 
 ## Connecting to Claude Code
 
-Add to your project's `.mcp.json` or to `~/.claude.json` under `mcpServers`:
+Add to your project's `.mcp.json` or `~/.claude.json` under `mcpServers`:
 
 ```json
 {
   "mcpServers": {
     "lazada": {
       "command": "python",
-      "args": ["/absolute/path/to/Lazada MCP/server.py"],
+      "args": ["/absolute/path/to/lazada_mcp/server.py"],
       "env": {
         "LAZADA_APP_KEY": "your_app_key",
         "LAZADA_APP_SECRET": "your_app_secret",
@@ -115,11 +170,6 @@ Add to your project's `.mcp.json` or to `~/.claude.json` under `mcpServers`:
     }
   }
 }
-```
-
-Or run inline:
-```bash
-LAZADA_APP_KEY=xxx LAZADA_APP_SECRET=yyy LAZADA_ACCESS_TOKEN=zzz python server.py
 ```
 
 ---
@@ -170,24 +220,25 @@ Get full details on this Lazada product: https://www.lazada.com.ph/products/...
 
 ## How the scraper works
 
-`lazada_scraper.py` calls Lazada's internal search API directly:
+`lazada_scraper.py` uses Playwright (headless Chromium) to bypass Lazada's bot detection. It visits the homepage first to acquire session cookies, then hits Lazada's internal search API:
 
 ```
 GET https://www.lazada.com.ph/catalog/?q=tuya+smart+bulb&ajax=true
 ```
 
-Lazada's own website uses this same endpoint to load search results in the browser. The response is structured JSON — no HTML parsing, no Chromium. This is why no browser installation is needed and there's no per-request cost.
+Lazada's own website uses this same endpoint to load search results. The response is structured JSON — no HTML parsing required. Playwright handles the bot challenge automatically via a real browser context with stealth patches.
 
 ---
 
 ## File structure
 
 ```
-Lazada MCP/
-├── server.py           # MCP server entry point (stdio transport)
+lazada_mcp/
+├── server.py           # MCP server entry point (stdio + SSE transport)
 ├── lazada_api.py       # Official LazOP API wrapper (seller tools)
-├── lazada_scraper.py   # Direct HTTP scraper (public tools)
-├── requirements.txt    # mcp, httpx
+├── lazada_scraper.py   # Playwright scraper (public tools)
+├── requirements.txt    # mcp, httpx, playwright, uvicorn, starlette
+├── Dockerfile          # Docker image for remote/production deployment
 ├── README.md           # This file
 └── FEASIBILITY.md      # Research notes on API vs scraper approach
 ```
@@ -205,5 +256,11 @@ Lazada MCP/
 **Access token expired error**
 → Use `lazada_refresh_token` with your refresh token to get a new one.
 
-**Connection refused on Claude Desktop**
+**`Executable doesn't exist` / Playwright version mismatch**
+→ The Dockerfile base image version must match the installed Playwright version. Rebuild with the correct image tag: `mcr.microsoft.com/playwright/python:vX.XX.X-jammy`.
+
+**Tools not appearing in Claude Desktop after redeploy**
+→ Restart Claude Desktop. If using Claude Code, also start a new session — SSE session IDs change on container restart.
+
+**Connection refused on Claude Desktop (local stdio)**
 → Make sure the `args` path uses the correct absolute path and Python is in your PATH.
