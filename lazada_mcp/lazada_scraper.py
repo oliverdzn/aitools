@@ -1,31 +1,30 @@
 """
 Lazada public product scraper for lazada.com.ph
-Uses Lazada's internal JSON API directly — no Playwright/Chromium needed.
-100% free, runs from your local machine.
+Uses Playwright (headless Chromium) to bypass Lazada's bot detection.
 
-How it works:
-  Lazada's website loads search results via an internal API:
-    GET https://www.lazada.com.ph/catalog/?q={keyword}&ajax=true
-  This returns structured JSON with product listings — same data the browser sees.
-  We call it directly with httpx + browser-like headers.
+Lazada uses a JS challenge (`_____tmd_____/punish`) that blocks plain HTTP requests.
+A real browser (Playwright) passes this challenge automatically.
+
+Install:
+    pip install playwright
+    playwright install chromium
+    playwright install-deps chromium
 """
-import httpx
+import asyncio
+import json
 import re
 from typing import Any
 
+from playwright.async_api import async_playwright
+
 BASE = "https://www.lazada.com.ph"
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-PH,en;q=0.9",
-    "Referer": "https://www.lazada.com.ph/",
-    "x-locale": "en_PH",
-}
+_STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-PH', 'en'] });
+window.chrome = { runtime: {} };
+"""
 
 
 def _parse_price(val: Any) -> float | None:
@@ -33,21 +32,11 @@ def _parse_price(val: Any) -> float | None:
         return None
     if isinstance(val, (int, float)):
         return float(val)
-    # Strip currency symbols and commas
     cleaned = re.sub(r"[^\d.]", "", str(val))
     return float(cleaned) if cleaned else None
 
 
-def search_products(keyword: str, limit: int = 20, sort: str = "popularity") -> list[dict]:
-    """
-    Search lazada.com.ph and return public product listings.
-    sort options: popularity | priceasc | pricedesc | rating | new | bestsell
-
-    Returns list of dicts: {
-        name, price, original_price, discount, rating, review_count,
-        sold_count, location, url, image_url, seller, is_sponsored, in_stock
-    }
-    """
+async def _search(keyword: str, limit: int, sort: str) -> list[dict]:
     sort_map = {
         "popularity": "pop",
         "priceasc": "priceasc",
@@ -56,23 +45,51 @@ def search_products(keyword: str, limit: int = 20, sort: str = "popularity") -> 
         "new": "new",
         "bestsell": "bestsell",
     }
-    params = {
-        "q": keyword,
-        "ajax": "true",
-        "sort": sort_map.get(sort, "pop"),
-    }
+    sort_param = sort_map.get(sort, "pop")
+    url = f"{BASE}/catalog/?q={keyword.replace(' ', '+')}&ajax=true&sort={sort_param}"
 
-    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=20) as client:
-        r = client.get(f"{BASE}/catalog/", params=params)
-        r.raise_for_status()
-        data = r.json()
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="en-PH",
+            timezone_id="Asia/Manila",
+            viewport={"width": 1280, "height": 800},
+        )
+        await context.add_init_script(_STEALTH_SCRIPT)
+        page = await context.new_page()
+
+        try:
+            # Visit homepage first to get session cookies
+            await page.goto(BASE, wait_until="domcontentloaded", timeout=20000)
+
+            # Now hit the search API — Playwright passes the bot challenge automatically
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            body = await response.text() if response else ""
+
+            # Response should be JSON
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                # Fallback: JSON might be embedded in HTML
+                match = re.search(r'window\.pageData\s*=\s*(\{.*?\});\s*</script>', body, re.DOTALL)
+                if not match:
+                    raise ValueError(f"Unexpected response from Lazada (length={len(body)}). Bot detection may have triggered.")
+                data = json.loads(match.group(1))
+
+        finally:
+            await browser.close()
 
     items = data.get("mods", {}).get("listItems", [])
     results = []
     for item in items[:limit]:
-        url = item.get("productUrl") or item.get("itemUrl") or ""
-        if url and not url.startswith("http"):
-            url = "https:" + url
+        product_url = item.get("productUrl") or item.get("itemUrl") or ""
+        if product_url and not product_url.startswith("http"):
+            product_url = "https:" + product_url
 
         results.append({
             "name": item.get("name"),
@@ -83,63 +100,84 @@ def search_products(keyword: str, limit: int = 20, sort: str = "popularity") -> 
             "review_count": item.get("review"),
             "sold_count": item.get("itemSoldCntShow"),
             "location": item.get("location"),
-            "url": url,
+            "url": product_url,
             "image_url": item.get("image"),
             "seller": item.get("sellerName"),
             "is_sponsored": item.get("isSponsored", False),
-            "in_stock": not item.get("inStock") is False,
+            "in_stock": item.get("inStock", True),
         })
 
     return results
 
 
-def get_product_detail(product_url: str) -> dict:
-    """
-    Get full details of a Lazada PH product page.
-    Hits the product URL with ajax=true to get structured JSON.
-    """
-    # Ensure clean URL
-    url = product_url.split("?")[0]
+async def _get_detail(product_url: str) -> dict:
+    clean_url = product_url.split("?")[0]
 
-    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=20) as client:
-        r = client.get(url, params={"ajax": "true"})
-        r.raise_for_status()
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            locale="en-PH",
+            timezone_id="Asia/Manila",
+        )
+        await context.add_init_script(_STEALTH_SCRIPT)
+        page = await context.new_page()
 
-        content_type = r.headers.get("content-type", "")
-        if "json" in content_type:
-            data = r.json()
-        else:
-            # Fall back to HTML parsing for key fields
-            text = r.text
-            import re as _re
-            price_match = _re.search(r'"price":\s*"?([\d.]+)"?', text)
-            name_match = _re.search(r'"subject":\s*"([^"]+)"', text)
+        try:
+            await page.goto(BASE, wait_until="domcontentloaded", timeout=20000)
+            await page.goto(clean_url, wait_until="domcontentloaded", timeout=30000)
+
+            # Extract embedded JSON from page
+            page_data = await page.evaluate("""
+                () => {
+                    if (window.__global_data) return window.__global_data;
+                    if (window.pageData) return window.pageData;
+                    return null;
+                }
+            """)
+
+            if not page_data:
+                # Fallback: scrape visible DOM
+                title = await page.title()
+                price_el = await page.query_selector('.pdp-price_type_normal')
+                price_text = await price_el.inner_text() if price_el else None
+                return {
+                    "url": product_url,
+                    "title": title,
+                    "price": _parse_price(price_text),
+                    "_note": "Partial data — JS data not available",
+                }
+
+            product = page_data.get("product", {})
+            skus = page_data.get("skus", [{}])
+            sku = skus[0] if skus else {}
+            seller = page_data.get("seller", {})
+
             return {
                 "url": product_url,
-                "title": name_match.group(1) if name_match else None,
-                "price": float(price_match.group(1)) if price_match else None,
-                "_note": "Partial data — page returned HTML instead of JSON",
+                "title": product.get("title"),
+                "brand": (product.get("brand") or {}).get("name") if isinstance(product.get("brand"), dict) else product.get("brand"),
+                "price": _parse_price(sku.get("price")),
+                "original_price": _parse_price(sku.get("originalPrice")),
+                "in_stock": sku.get("quantity", 0) > 0,
+                "rating": page_data.get("review", {}).get("ratings"),
+                "review_count": page_data.get("review", {}).get("count"),
+                "seller": seller.get("name"),
+                "description": product.get("description"),
+                "images": [img.get("image") for img in product.get("images", []) if img.get("image")],
             }
+        finally:
+            await browser.close()
 
-    # Extract from JSON response
-    page_data = data.get("pageData", {})
-    product = page_data.get("product", {})
-    skus = page_data.get("skus", [{}])
-    sku = skus[0] if skus else {}
-    seller = page_data.get("seller", {})
 
-    return {
-        "url": product_url,
-        "title": product.get("title"),
-        "brand": product.get("brand", {}).get("name") if isinstance(product.get("brand"), dict) else product.get("brand"),
-        "price": _parse_price(sku.get("price")),
-        "original_price": _parse_price(sku.get("originalPrice")),
-        "in_stock": sku.get("quantity", 0) > 0,
-        "rating": page_data.get("review", {}).get("ratings"),
-        "review_count": page_data.get("review", {}).get("count"),
-        "seller": seller.get("name"),
-        "seller_rating": seller.get("sellerScore"),
-        "description": product.get("description"),
-        "images": [img.get("image") for img in product.get("images", []) if img.get("image")],
-        "warranty": product.get("warranty"),
-    }
+# Sync wrappers for use from synchronous MCP tool handlers
+def search_products(keyword: str, limit: int = 20, sort: str = "popularity") -> list[dict]:
+    return asyncio.run(_search(keyword, limit, sort))
+
+
+def get_product_detail(url: str) -> dict:
+    return asyncio.run(_get_detail(url))
