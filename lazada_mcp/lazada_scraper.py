@@ -176,8 +176,22 @@ async def _get_detail(product_url: str) -> dict:
 
 # Sync wrappers for use from synchronous MCP tool handlers
 def search_products(keyword: str, limit: int = 20, sort: str = "popularity") -> list[dict]:
-    return asyncio.run(_search(keyword, limit, sort))
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(asyncio.run, _search(keyword, limit, sort))
+            return future.result()
+    except RuntimeError:
+        return asyncio.run(_search(keyword, limit, sort))
 
 
 def get_product_detail(url: str) -> dict:
-    return asyncio.run(_get_detail(url))
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            future = pool.submit(asyncio.run, _get_detail(url))
+            return future.result()
+    except RuntimeError:
+        return asyncio.run(_get_detail(url))
