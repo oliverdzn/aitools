@@ -4,13 +4,22 @@ Lazada MCP Server
 Exposes Lazada Open Platform (seller) tools + public scraper tools
 for lazada.com.ph
 
-Transport: stdio (default for Claude Desktop)
+Transport modes:
+  stdio  — default, for local use (Claude Desktop on same machine)
+  sse    — HTTP/SSE server for remote use (Claude Desktop on a different machine)
+
+Usage:
+  python server.py              # stdio (local)
+  python server.py --sse        # SSE on port 8000
+  python server.py --sse --port 9000  # SSE on custom port
 
 Environment variables:
   LAZADA_APP_KEY        required for seller tools
   LAZADA_APP_SECRET     required for seller tools
   LAZADA_ACCESS_TOKEN   required for seller tools (from OAuth)
+  MCP_PORT              SSE port override (default: 8000)
 """
+import argparse
 import json
 import os
 from typing import Any
@@ -365,11 +374,57 @@ async def call_tool(name: str, arguments: dict) -> CallToolResult:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
-async def main():
+async def _run_stdio():
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
+def _run_sse(host: str, port: int):
+    from mcp.server.sse import SseServerTransport
+    from starlette.applications import Starlette
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.routing import Mount, Route
+    import uvicorn
+
+    sse_transport = SseServerTransport("/messages/")
+
+    async def handle_sse(request):
+        async with sse_transport.connect_sse(
+            request.scope, request.receive, request._send
+        ) as streams:
+            await app.run(streams[0], streams[1], app.create_initialization_options())
+
+    class NoCacheMiddleware(BaseHTTPMiddleware):
+        """Prevent Cloudflare and proxies from buffering SSE responses."""
+        async def dispatch(self, request, call_next):
+            response = await call_next(request)
+            if "text/event-stream" in response.headers.get("content-type", ""):
+                response.headers["Cache-Control"] = "no-cache"
+                response.headers["X-Accel-Buffering"] = "no"
+            return response
+
+    starlette_app = Starlette(
+        routes=[
+            Route("/sse", endpoint=handle_sse),
+            Mount("/messages/", app=sse_transport.handle_post_message),
+        ]
+    )
+    starlette_app.add_middleware(NoCacheMiddleware)
+
+    print(f"Lazada MCP running on http://{host}:{port}/sse")
+    uvicorn.run(starlette_app, host=host, port=port)
+
+
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+
+    parser = argparse.ArgumentParser(description="Lazada MCP Server")
+    parser.add_argument("--sse", action="store_true", help="Run as SSE HTTP server (for remote connections)")
+    parser.add_argument("--host", default="0.0.0.0", help="SSE bind host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("MCP_PORT", 8000)), help="SSE port (default: 8000)")
+    args = parser.parse_args()
+
+    if args.sse:
+        _run_sse(args.host, args.port)
+    else:
+        asyncio.run(_run_stdio())

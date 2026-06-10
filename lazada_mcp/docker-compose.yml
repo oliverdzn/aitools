@@ -1,0 +1,12 @@
+services:
+  lazada-mcp:
+    build: .
+    ports:
+      - "7771:7771"
+    environment:
+      - LAZADA_APP_KEY=${LAZADA_APP_KEY:-}
+      - LAZADA_APP_SECRET=${LAZADA_APP_SECRET:-}
+      - LAZADA_ACCESS_TOKEN=${LAZADA_ACCESS_TOKEN:-}
+      - MCP_PORT=7771
+    restart: unless-stopped
+    shm_size: 256mb        # Chromium needs shared memory
