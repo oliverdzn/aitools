@@ -5,6 +5,7 @@ then calls Shopee's internal search/item JSON API.
 """
 import asyncio
 import json
+import os
 import re
 from typing import Any
 
@@ -13,6 +14,8 @@ from playwright.async_api import async_playwright
 BASE = "https://shopee.ph"
 SEARCH_URL = BASE + "/api/v4/search/search_items"
 ITEM_URL = BASE + "/api/v4/item/get"
+
+SESSION_FILE = os.environ.get("SHOPEE_SESSION_FILE", "/app/shopee_session.json")
 
 _STEALTH_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -34,16 +37,19 @@ def _parse_price(val: Any) -> float | None:
 
 async def _new_context(pw):
     browser = await pw.chromium.launch(headless=True)
-    context = await browser.new_context(
-        user_agent=(
+    kwargs: dict = {
+        "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        locale="en-PH",
-        timezone_id="Asia/Manila",
-        viewport={"width": 1280, "height": 800},
-    )
+        "locale": "en-PH",
+        "timezone_id": "Asia/Manila",
+        "viewport": {"width": 1280, "height": 800},
+    }
+    if os.path.exists(SESSION_FILE):
+        kwargs["storage_state"] = SESSION_FILE
+    context = await browser.new_context(**kwargs)
     await context.add_init_script(_STEALTH_SCRIPT)
     return browser, context
 

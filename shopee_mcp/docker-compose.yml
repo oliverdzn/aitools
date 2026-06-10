@@ -8,4 +8,7 @@ services:
       - SHOPEE_PARTNER_KEY=${SHOPEE_PARTNER_KEY:-}
       - SHOPEE_ACCESS_TOKEN=${SHOPEE_ACCESS_TOKEN:-}
       - SHOPEE_SHOP_ID=${SHOPEE_SHOP_ID:-}
+      - SHOPEE_SESSION_FILE=/app/shopee_session.json
+    volumes:
+      - ./shopee_session.json:/app/shopee_session.json:ro
     restart: unless-stopped
